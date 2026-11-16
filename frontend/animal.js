@@ -29,12 +29,12 @@ async function haeElain() {
 
         // Eläimen kuva
         const image = document.createElement('img');
-        image.src = animal.image_url || 'public/images/placeholder.jpg';
+        image.src = animal.image_url || '/images/placeholder.jpg';
         image.alt = animal.name;
 
         image.onerror = () => {
             image.onerror = null;
-            image.src = 'public/images/placeholder.jpg';
+            image.src = '/images/placeholder.jpg';
         };
 
         // Eläimen tiedot
