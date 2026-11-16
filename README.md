@@ -28,7 +28,7 @@ docker-compose down -v poistaa tietokannan, ja seuraava käynnistys luo sen uude
 # arkkitehtuuri
 | Palvelu | Teknologia | Portti | Tehtävä |
 | --- | --- | --- | --- |
-| frontend | nginx, HTML/CSS/JS | 8080 | Käyttöliittymä, välittää `/api/*`-kutsut Server A:lle |
+| frontend | nginx, HTML/CSS/JS | 8080 | Käyttöliittymä, nginx välittää `/animals`-kutsut Server A:lle |
 | server-a | Node.js 20, Express | 3001 | Eläintiedot ja API Gateway |
 | server-b | Node.js 20, Express | 3002 | Adoptiohakemusten tallennus |
 | db | PostgreSQL 16 | – | Tietokanta |
@@ -125,8 +125,79 @@ curl.exe -X POST http://localhost:3001/animals/1/adopt -H "Content-Type: applica
 
 ## API: Server B (portti 3002)
 
-_Täydennetään, kun Server B valmistuu._
+Server B käsittelee adoptiohakemukset. Frontend ei kutsu sitä koskaan suoraan, vaan hakemukset tulevat aina Server A:n kautta Docker-verkossa (`http://server-b:3002`).
+
+| Metodi | Polku | Kuvaus | Vastaukset |
+| --- | --- | --- | --- |
+| GET | `/health` | Palvelun tila | 200 |
+| POST | `/adoptions` | Tallentaa hakemuksen ja merkitsee eläimen adoptoiduksi | 201, 400, 404, 409, 500 |
+| GET | `/adoptions` | Kaikki hakemukset eläimen nimen kanssa, uusin ensin | 200, 500 |
+
+**Esimerkki: POST /adoptions**
+
+Pyynnön runko (Server A lisää `animal_id`:n URL-osoitteesta):
+
+```json
+{
+  "animal_id": 1,
+  "applicant_name": "Matti Meikäläinen",
+  "email": "matti@example.com",
+  "phone": "040 123 4567",
+  "message": "Minulla on iso piha."
+}
+```
+
+Onnistunut vastaus (201):
+
+```json
+{
+  "success": true,
+  "adoption_id": 1,
+  "animal_id": 1,
+  "created_at": "2026-11-16T11:20:00.000Z",
+  "message": "Adoptiohakemus vastaanotettu"
+}
+```
+
+| Tilanne | Status | Vastaus |
+| --- | --- | --- |
+| Onnistui | 201 | Vahvistus (yllä) |
+| `animal_id`, nimi tai sähköposti puuttuu | 400 | `{ "error": "animal_id, nimi ja sähköposti ovat pakollisia" }` |
+| Eläintä ei ole | 404 | `{ "error": "Eläintä ei löytynyt" }` |
+| Eläin on jo adoptoitu | 409 | `{ "error": "Eläin on jo adoptoitu" }` |
+| Tietokantavirhe | 500 | `{ "error": "Hakemuksen tallennus epäonnistui" }` |
+
+### Tuplaadoption esto
+
+Saman eläimen adoptointi kahdesti on estetty kolmella tavalla:
+
+1. **Transaktio ja rivilukitus:** Server B avaa transaktion ja lukitsee eläimen rivin (`SELECT ... FOR UPDATE`). Samanaikainen toinen hakemus joutuu odottamaan, kunnes ensimmäinen on valmis.
+2. **Statuksen tarkistus:** Jos eläimen `status` on jo `adopted`, transaktio perutaan ja palautetaan 409.
+3. **Tietokannan UNIQUE-rajoite:** `adoptions.animal_id` on uniikki. Jos rajoite jostain syystä laukeaa (virhekoodi `23505`), Server B palauttaa silti 409.
+
+Hakemuksen tallennus ja eläimen statuksen päivitys tehdään samassa transaktiossa, joten joko molemmat onnistuvat tai kumpikaan ei jää voimaan.
+
+Testaus suoraan Server B:lle:
+
+```
+curl.exe -X POST http://localhost:3002/adoptions -H "Content-Type: application/json" -d "{\"animal_id\":2,\"applicant_name\":\"Testi\",\"email\":\"t@example.com\"}"
+curl.exe http://localhost:3002/adoptions
+```
+
 
 ## Käyttöliittymä
 
-_Täydennetään, kun frontend valmistuu._
+Frontend on tavallista HTML:ää, CSS:ää ja JavaScriptiä, ja nginx tarjoilee sen osoitteessa http://localhost:8080. Nginx välittää kaikki `/animals`-alkuiset kutsut Server A:lle (`frontend/nginx.conf`), joten selain puhuu vain yhdelle osoitteelle eikä CORS-asetuksia tarvita.
+
+| Sivu | Tiedostot | Sisältö |
+| --- | --- | --- |
+| Etusivu | `index.html`, `script.js` | Eläinkortit: kuva, nimi, laji, ikä, adoptiotila ja Katso lisää -painike |
+| Eläimen sivu | `animal.html`, `animal.js` | Kaikki eläimen tiedot ja adoptiolomake, joka näytetään vain adoptoitavissa oleville eläimille |
+| Kiitos-sivu | `thank-you.html` | Vahvistus, joka näytetään vasta kun hakemus on tallennettu tietokantaan |
+
+1. Etusivu hakee eläimet: `GET /animals`
+2. Katso lisää avaa sivun `animal.html?id=1`, joka hakee tiedot: `GET /animals/1`
+3. Lomake lähettää hakemuksen: `POST /animals/1/adopt`
+4. Kun vastaus on 201, käyttäjä ohjataan kiitos-sivulle. Virheen sattuessa (esim. 409) virheviesti näytetään lomakkeen alla.
+
+Jos eläimellä ei ole kuvaa, tilalla näytetään placeholder-kuva. Kuvat ovat kansiossa `frontend/images/`, ja tyylit tiedostossa `style.css`.
